@@ -211,8 +211,8 @@ def compute_basin_map_seeds(beta, method="adam", n_seeds=400,
     This is a 1D basin map (seed axis only).
     For 2D maps (seed x learning_rate), use compute_basin_map_2d.
     """
-    outcomes = np.zeros(n_seeds, dtype=int)
-    l2_errors = np.zeros(n_seeds)
+    outcomes = np.full(n_seeds, -1, dtype=int)
+    l2_errors = np.full(n_seeds, np.nan)
 
     for i in range(n_seeds):
         t0 = time.time()
@@ -230,7 +230,8 @@ def compute_basin_map_seeds(beta, method="adam", n_seeds=400,
                   f"{dt:.1f}s  "
                   f"correct={n_ok}/{i+1}  "
                   f"L2={l2_err:.4f}  "
-                  f"loss={loss:.2e}")
+                  f"loss={loss:.2e}",
+                  flush=True)
 
     return outcomes, l2_errors
 
@@ -251,8 +252,8 @@ def compute_basin_map_2d(beta, method="adam",
         lr_values = np.logspace(-5, -1, 50)
 
     n_lr = len(lr_values)
-    outcomes = np.zeros((n_seeds, n_lr), dtype=int)
-    l2_errors = np.zeros((n_seeds, n_lr))
+    outcomes = np.full((n_seeds, n_lr), -1, dtype=int)
+    l2_errors = np.full((n_seeds, n_lr), np.nan)
 
     total = n_seeds * n_lr
     count = 0
@@ -268,10 +269,12 @@ def compute_basin_map_2d(beta, method="adam",
             count += 1
 
             if count % 100 == 0:
-                n_ok = np.sum(outcomes == CORRECT)
+                done_mask = outcomes >= 0
+                n_ok = np.sum(outcomes[done_mask] == CORRECT)
                 print(f"  {count:5d}/{total}  "
                       f"correct={n_ok}/{count}  "
-                      f"lr={lr:.1e}  seed={i}")
+                      f"lr={lr:.1e}  seed={i}",
+                      flush=True)
 
     return outcomes, l2_errors, lr_values
 
@@ -280,25 +283,36 @@ def compute_basin_map_2d(beta, method="adam",
 # Visualization
 # =================================================================
 
+OUTCOME_COLORS = {
+    CORRECT:  [0.0, 0.8, 0.0],
+    TRIVIAL:  [1.0, 0.6, 0.0],
+    DIVERGED: [0.2, 0.2, 0.2],
+    -1:       [0.9, 0.9, 0.9],
+}
+
+OUTCOME_LABELS = {
+    CORRECT:  "Correct (<1% L2)",
+    TRIVIAL:  "Trivial (>1% L2)",
+    DIVERGED: "Diverged",
+    -1:       "Not computed",
+}
+
+
 def plot_basin_1d(outcomes, title="", filename=None):
     """Plot 1D basin map (seed vs outcome)."""
     import matplotlib.pyplot as plt
-
-    colors_map = {CORRECT: [0.0, 0.8, 0.0],
-                  TRIVIAL: [1.0, 0.6, 0.0],
-                  DIVERGED: [0.2, 0.2, 0.2]}
+    from matplotlib.patches import Patch
 
     fig, ax = plt.subplots(figsize=(12, 1.5))
-    img = np.array([colors_map[o] for o in outcomes])
+    img = np.array([OUTCOME_COLORS[o] for o in outcomes])
     ax.imshow(img[None, :, :], aspect="auto", extent=[0, len(outcomes), 0, 1])
     ax.set_xlabel("Seed")
     ax.set_yticks([])
     ax.set_title(title)
 
-    from matplotlib.patches import Patch
-    legend = [Patch(facecolor=colors_map[CORRECT], label="Correct (<1% L2)"),
-              Patch(facecolor=colors_map[TRIVIAL], label="Trivial (>1% L2)"),
-              Patch(facecolor=colors_map[DIVERGED], label="Diverged")]
+    present = sorted(set(outcomes))
+    legend = [Patch(facecolor=OUTCOME_COLORS[o], label=OUTCOME_LABELS[o])
+              for o in present]
     ax.legend(handles=legend, loc="upper right", fontsize=7)
 
     fig.tight_layout()
@@ -313,15 +327,13 @@ def plot_basin_1d(outcomes, title="", filename=None):
 def plot_basin_2d(outcomes, lr_values, title="", filename=None):
     """Plot 2D basin map (seed x learning_rate)."""
     import matplotlib.pyplot as plt
-
-    colors_map = np.array([
-        [0.0, 0.8, 0.0],   # CORRECT
-        [1.0, 0.6, 0.0],   # TRIVIAL
-        [0.2, 0.2, 0.2],   # DIVERGED
-    ])
+    from matplotlib.patches import Patch
 
     h, w = outcomes.shape
-    img = colors_map[outcomes]
+    img = np.zeros((h, w, 3))
+    for code, color in OUTCOME_COLORS.items():
+        mask = outcomes == code
+        img[mask] = color
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.imshow(img, aspect="auto", origin="lower",
@@ -331,10 +343,9 @@ def plot_basin_2d(outcomes, lr_values, title="", filename=None):
     ax.set_ylabel("Seed")
     ax.set_title(title)
 
-    from matplotlib.patches import Patch
-    legend = [Patch(facecolor=colors_map[CORRECT], label="Correct (<1% L2)"),
-              Patch(facecolor=colors_map[TRIVIAL], label="Trivial (>1% L2)"),
-              Patch(facecolor=colors_map[DIVERGED], label="Diverged")]
+    present = sorted(set(outcomes.ravel()))
+    legend = [Patch(facecolor=OUTCOME_COLORS[o], label=OUTCOME_LABELS[o])
+              for o in present]
     ax.legend(handles=legend, loc="upper right", fontsize=8)
 
     fig.tight_layout()
@@ -344,6 +355,72 @@ def plot_basin_2d(outcomes, lr_values, title="", filename=None):
         fig.savefig(filename, dpi=150, bbox_inches="tight")
         print(f"  Saved: {filename}")
     plt.close(fig)
+
+
+# =================================================================
+# Basin entropy (Daza et al. 2016)
+# =================================================================
+
+def basin_entropy(outcomes, box_size=5):
+    """
+    Compute basin entropy S_b for a 2D outcome grid.
+    Only counts boxes where all cells have been computed (>= 0).
+    """
+    h, w = outcomes.shape
+    entropies = []
+    for i in range(0, h - box_size + 1):
+        for j in range(0, w - box_size + 1):
+            box = outcomes[i:i+box_size, j:j+box_size].ravel()
+            if np.any(box < 0):
+                continue
+            unique, counts = np.unique(box, return_counts=True)
+            probs = counts / counts.sum()
+            entropies.append(-np.sum(probs * np.log(probs)))
+    if not entropies:
+        return np.nan
+    return np.mean(entropies)
+
+
+# =================================================================
+# Save / load results
+# =================================================================
+
+def save_results(filename, outcomes, l2_errors, lr_values, beta,
+                 method, n_adam, S_b=None, extra=None):
+    """Save basin map results to .npz file."""
+    from pathlib import Path
+    Path(filename).parent.mkdir(parents=True, exist_ok=True)
+    data = dict(
+        outcomes=outcomes, l2_errors=l2_errors, lr_values=lr_values,
+        beta=beta, method=method, n_adam=n_adam,
+    )
+    if S_b is not None:
+        data["basin_entropy"] = S_b
+    if extra:
+        data.update(extra)
+    np.savez(filename, **data)
+    print(f"  Saved: {filename}")
+
+
+def load_results(filename):
+    """Load basin map results from .npz file."""
+    return dict(np.load(filename, allow_pickle=True))
+
+
+def summarize_outcomes(outcomes):
+    """Print outcome counts for a completed basin map."""
+    done = outcomes[outcomes >= 0]
+    total = len(done)
+    n_c = np.sum(done == CORRECT)
+    n_t = np.sum(done == TRIVIAL)
+    n_d = np.sum(done == DIVERGED)
+    not_done = np.sum(outcomes < 0)
+    print(f"  Correct: {n_c}/{total} ({100*n_c/total:.1f}%)")
+    print(f"  Trivial: {n_t}/{total} ({100*n_t/total:.1f}%)")
+    print(f"  Diverged: {n_d}/{total} ({100*n_d/total:.1f}%)")
+    if not_done > 0:
+        print(f"  Not computed: {not_done}")
+    return n_c, n_t, n_d
 
 
 # =================================================================
