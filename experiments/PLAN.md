@@ -1,316 +1,330 @@
-# Numerical Experiments Plan
+# Research Plan: Basin Analysis & PM-Damping for PINNs
+# Target: Journal of Computational Physics (JCP)
+# Updated: 2026-05-05
 
-## Overview
+## Strategy
 
-Three phases, ordered by dependency and risk. Each phase produces standalone results; later phases build on earlier infrastructure.
+One paper with two coupled contributions:
+1. **Diagnostic:** Dimension-independent basin analysis for PINN training (basin stability + basin entropy)
+2. **Method:** Ermakov-Kalitkin (PM) damped L-BFGS for PINNs
 
----
+Key insight from May 2025 analysis: 2D basin maps alone are insufficient (reviewers will question representativeness). The paper must lead with dimension-independent statistical metrics, supported by 2D visualizations as illustrations.
 
-## Phase 0: Reproduce Paper Results in JAX (Validation Baseline)
+## Critical References to Cite/Position Against
 
-**Goal:** Verify our JAX infrastructure by reproducing Figs. 1–8 and Table 1 from Budzko et al. 2015 before touching PINNs.
-
-### Experiment 0.1 — Scalar Basins of Attraction
-
-Reproduce phase planes for f₁(x) = arctan(x), f₂(x) = arctan(x) − 2x/(1+x²), f₃(x) = (x²−1)/(x²+1) + 1.
-
-**Methods to implement:**
-| Method | Formula | Order |
-|--------|---------|-------|
-| Newton | x_{k+1} = x_k − f(x_k)/f'(x_k) | 2 |
-| Ermakov-Kalitkin | Newton with β_k = \|f\|²/(\|f\|² + \|f − f'⁻¹f\|²) | 2 |
-| Traub | y = x − f/f'; x_{k+1} = x − (f(x)+f(y))/f'(x) | 3 |
-| Jarratt | z = x − (2/3)(f/f'); x_{k+1} = x − (1/2)(3f'(z)+f'(x))⁻¹(3f'(z)−f'(x))f/f' | 4 |
-| PM(α) | Two-step predictor-corrector, eq. (4) | 3 |
-
-**Grid:** 400×400 in complex plane, Re(z) ∈ [−6, 6], Im(z) ∈ [−6, 6].
-**Coloring:** by root reached (orange/green/blue), brightness by iteration count, black = no convergence in 80 steps.
-**α values:** −0.45, −0.01, 0.1, 0.45.
-
-**Deliverable:** 24 phase plane plots matching Figs. 1–8. Visual diff against paper figures.
-
-### Experiment 0.2 — System Basins (Restricted Four-Body Problem)
-
-Reproduce Figs. 7–8: basins for system (18) with μ₁ = 0.25, μ₂ = 0.35 (8 solutions).
-
-**Grid:** 400×400 in (x, y) plane.
-**Deliverable:** 6 phase plane plots (Newton, E-K, Traub, Jarratt, PM α=−0.01, PM α=0.1).
-
-### Experiment 0.3 — Numerical Convergence Table
-
-Reproduce Table 1 (scalar) and Table 2 (system): iteration counts, ACOC, residual norms.
-**Precision:** Use float64 (not 10000-digit Mathematica arithmetic — sufficient for PINN context).
-
-**Deliverable:** Tables matching paper results within float64 precision.
-
-**Estimated compute:** < 1 hour on CPU (Colab free tier sufficient).
+| Paper | What they do | Our differentiation |
+|-------|-------------|---------------------|
+| Ly & Gong (Nature Comms, Apr 2025) | Multifractal loss landscape theory for generic DL | We: computational diagnostic for PINNs specifically |
+| Ly & Gong (arXiv:2510.05606, 2025) | Riddled basin geometry, uncertainty exponent → 0 for DL | We: first quantitative basin entropy metric for PINNs; they are theoretical |
+| Sohl-Dickstein (arXiv:2402.06184, 2024) | Fractal trainability boundary in hyperparameter space | We: initialization space basins, not hyperparameter space |
+| Urbán et al. (JCP, Dec 2024) | SSBFGS: BFGS beats Adam by 6 orders of magnitude | Must compare against — this is current SOTA |
+| FP64 paper (NeurIPS 2025) | PINN failures = L-BFGS premature stop in FP32 | Our PM-damping is complementary fix; run all in FP64 |
+| Rathore et al. (ICML 2024) | NysNewton-CG + loss landscape via Hessian spectrum | We: global basin structure (complementary to their local curvature) |
+| Ensemble PINNs (Proc. Roy. Soc. A, 2025) | 50 random inits discover multiple solutions | Closest to our Monte Carlo approach but no entropy metric |
+| Menck et al. (Nature Physics, 2013) | Basin stability is dimension-independent | Theoretical foundation for our approach |
+| Daza et al. (Sci. Rep. 2016) | Basin entropy for dynamical systems | We apply their metric to ML for the first time |
 
 ---
 
-## Phase 1: Basin Analysis for PINN Optimizers (Diagnostic)
+## Phase 0: Reproduce Paper Results [COMPLETED]
 
-**Goal:** Build basin-of-convergence maps for PINN training, quantify fractal structure via basin entropy.
+**Status: DONE** (commits 4105b7b, e150807)
 
-### Experiment 1.1 — PINN on 1D Convection Equation (Canonical Failure Case)
-
-**PDE:** uₜ + β·uₓ = 0, x ∈ [0, 2π], t ∈ [0, 1], u(x,0) = sin(x), periodic BC.
-**β values:** 30 (moderate failure), 50 (severe failure) — per Krishnapriyan et al. 2021.
-**Architecture:** MLP 4×50, tanh, fixed across all runs.
-
-**2D cross-sections for basin maps:**
-| Section ID | Axis X | Axis Y | Everything else |
-|------------|--------|--------|-----------------|
-| S1 | random seed (0–159999) | — | Fixed LR, single row = one run per seed |
-| S2 | learning rate (log scale, 1e-5 to 1e-1) | random seed (0–399) | 400×400 grid |
-| S3 | weight[0,0] of layer 1 | weight[0,1] of layer 1 | Rest from fixed seed |
-| S4 | PC1 | PC2 | PCA of 400 random inits, project onto top-2 components |
-
-**Outcome classification for each run:**
-- **Correct:** L2 relative error < 1% against analytical solution
-- **Trivial:** loss converges but L2 error > 10% (wrong/trivial solution)
-- **Divergent:** loss > initial loss or NaN
-
-**Training budget per run:** 5000 Adam steps (enough to classify basin, not full convergence).
-
-**Optimizers to compare:**
-| Optimizer | Config |
-|-----------|--------|
-| Adam | lr=1e-3, default betas |
-| L-BFGS | max_iter=100, strong Wolfe |
-| Adam(10k) + L-BFGS | Standard two-phase |
-| Adam(10k) + NysNewton-CG | Per Rathore 2024 |
-| Adam(10k) + SSBFGS | Per Urbán 2024 |
-
-**Deliverable:** 5 optimizers × 4 cross-sections × 2 β values = 40 basin maps.
-
-### Experiment 1.2 — PINN on Allen-Cahn Equation (Stiff PDE)
-
-**PDE:** uₜ = ε²·uₓₓ + u − u³, x ∈ [−1, 1], t ∈ [0, 1], ε = 0.01.
-**Same protocol** as Experiment 1.1 but with this PDE.
-
-**Deliverable:** 40 more basin maps. Cross-PDE comparison of basin structure.
-
-### Experiment 1.3 — Basin Entropy Computation
-
-For every basin map from 1.1 and 1.2:
-
-**Basin entropy S_b (Daza et al. 2016):**
-1. Partition the map into boxes of size ε × ε
-2. In each box, count distinct colors (outcomes) → local entropy
-3. S_b = average over all boxes
-4. Repeat for ε = {2, 4, 8, 16, 32, 64} pixels
-
-**Uncertainty exponent α_u:**
-1. Count fraction f(ε) of "uncertain" boxes (boxes with >1 color)
-2. Plot log(f) vs log(ε)
-3. Slope = α_u − 1, so α_u = slope + 1
-4. α_u = 1 → smooth boundaries; α_u < 1 → fractal
-
-**Deliverable:** Table of (optimizer, PDE, β, S_b, α_u). Bar charts comparing optimizers.
-
-### Experiment 1.4 — Hypothesis Testing
-
-**H1:** Correlation of α_u with empirical failure rate.
-- failure_rate = fraction of grid points classified as "trivial" or "divergent"
-- Compute Pearson/Spearman correlation of α_u vs failure_rate across all configs
-- Expected: negative correlation (more fractal → higher failure rate)
-
-**H2:** Second-order methods produce less fractal basins.
-- Compare α_u: {Adam} vs {L-BFGS, NysNewton-CG, SSBFGS}
-- Wilcoxon rank-sum test
-
-**H3:** Existing fixes smooth basins but not completely.
-- Add runs with: (a) adaptive loss weighting (Wang et al. 2021), (b) curriculum training (Krishnapriyan 2021)
-- Compare α_u with/without fixes
-- 2×2 extra sets of basin maps (2 fixes × 2 PDEs)
-
-**Deliverable:** Statistical tests with p-values, correlation plots.
-
-**Estimated compute for Phase 1:**
-- 160,000 short PINN runs per basin map × 5000 steps each
-- ~80 basin maps total
-- Each run ~2-5 seconds on GPU → ~100-400 GPU-hours
-- Strategy: 5000-step runs on Colab Pro, parallelized via jax.vmap over batch of initializations
-- Optimization: vectorize weight init, run 400 PINNs in parallel via vmap
+- Scalar basins (Figs 1-6): ✓ output/phase0/fig1-6_*.png
+- System basins (Figs 7-8): ✓ output/phase0/fig7-8_*.png
+- JAX infrastructure validated
 
 ---
 
-## Phase 2: PM-Damped L-BFGS for PINNs (Method)
+## Phase 1: Dimension-Independent Basin Analysis (Diagnostic)
 
-**Goal:** Implement Ermakov-Kalitkin damping in PINN training, demonstrate basin smoothing.
+**Goal:** Establish basin stability and basin entropy as quantitative PINN reliability metrics that work in full parameter space (not just 2D slices).
 
-### Experiment 2.1 — PM-L-BFGS Implementation
+### Phase 1A — Monte Carlo Basin Stability [PRIORITY]
 
-**Variant 1 (zero overhead):**
+**Concept:** Run N random PINN initializations, classify outcomes, compute statistics. Dimension-independent by Menck et al. 2013 — accuracy depends only on N, not on parameter dimension.
+
+**Setup:**
+- PDE: 1D convection u_t + β·u_x = 0, β ∈ {1, 5, 10, 30, 50}
+- Architecture: MLP 4×50, tanh (same as Krishnapriyan et al. 2021)
+- Initialization: Xavier/Glorot normal (standard, not customized)
+- Training: Adam 5000 steps, lr=1e-3
+- N = 1000 runs per (beta, optimizer) pair
+- **Precision: FP64** (per FP64 paper findings)
+
+**Optimizers:**
+| Optimizer | Config | Notes |
+|-----------|--------|-------|
+| Adam | lr=1e-3, 5000 steps | Baseline |
+| Adam + L-BFGS | 5000 Adam + L-BFGS to convergence | Standard two-phase |
+| Adam + PM-L-BFGS | 5000 Adam + PM-damped L-BFGS | Our method (Phase 2) |
+| Adam + SSBFGS | 5000 Adam + Self-Scaled BFGS | Urbán et al. 2024 baseline |
+
+**Outcome classification:**
+- CORRECT: L2 relative error < 1%
+- TRIVIAL: L2 error ∈ [1%, 100%] — converged to wrong/trivial solution
+- DIVERGED: L2 > 100% or NaN or loss increased
+
+**Metrics per (beta, optimizer):**
+- Basin stability: P(CORRECT), P(TRIVIAL), P(DIVERGED)
+- 95% confidence intervals (binomial)
+- Mean/median L2 error
+- Failure rate = 1 - P(CORRECT)
+
+**Compute:** 1000 runs × 5 betas × 4 optimizers = 20,000 runs. At ~7s/run on A100: ~39 GPU-hours.
+
+### Phase 1B — k-NN Basin Entropy in Full Parameter Space
+
+**Concept:** For each trained initialization θ₀ᵢ ∈ R^d, look at k nearest neighbors in parameter space and compute local outcome entropy. Average = basin entropy estimate in full dimension.
+
+**Algorithm:**
 ```
-Standard L-BFGS step gives direction d_k (≈ H⁻¹g_k)
-g_k = ∇L(θ_k)
-β_k = ||g_k||² / (||g_k||² + ||g_k − d_k||²)
-θ_{k+1} = θ_k − β_k · d_k
+Input: {(θ₀ᵢ, outcomeᵢ)}_{i=1}^N, parameter k
+For each i:
+    Find k nearest neighbors of θ₀ᵢ (Euclidean norm in R^d)
+    Count outcome distribution among k neighbors: n_correct, n_trivial, n_diverged
+    H_i = -Σ (n_c/k) · log(n_c/k) for each class c with n_c > 0
+S_b = (1/N) · Σ H_i
+```
+
+**Parameters:**
+- k ∈ {5, 10, 20, 50, 100} — multi-scale analysis
+- Same runs as Phase 1A (no extra computation, just post-processing)
+- Compare S_b(k) across optimizers and betas
+
+**Scaling analysis:** Plot S_b vs k on log-log scale → estimate uncertainty exponent α.
+
+**Deliverable:** Table of S_b per (optimizer, beta, k). Comparison across optimizers.
+
+### Phase 1C — 2D Basin Maps (Visualization)
+
+**Purpose:** Illustration supporting the dimension-independent metrics. Framing: "analogous to loss landscape visualization (Li et al. 2018 NeurIPS)" — accepted diagnostic, not exhaustive description.
+
+**Three types of 2D visualization:**
+
+1. **Seed × Learning Rate grid** (30×30 or 50×50):
+   - X: learning rate, logspace(1e-5, 1e-1, 30)
+   - Y: random seed (0–29)
+   - Color by outcome
+   - Already implemented in convection_pinn.py
+
+2. **PCA projection:**
+   - Collect N=1000 initial weight vectors from Phase 1A
+   - PCA → top 2 components
+   - Scatter plot colored by outcome
+   - Shows whether basins have spatial structure in parameter space
+
+3. **Random 2D subspace** (à la Li et al. 2018):
+   - Center: mean of all θ₀ vectors
+   - Two filter-normalized random directions
+   - Evaluate on 30×30 grid in that plane
+   - Repeat for 5 random planes → report consistency of S_b
+
+**Cross-section consistency test:**
+- Compute S_b for 5-10 independent random 2D subspaces
+- Report mean ± std
+- If std is small → 2D slices are representative of full-D structure
+
+### Phase 1D — Allen-Cahn Equation (Second PDE)
+
+Same protocol as 1A-1C but for Allen-Cahn: u_t = ε²·u_xx + u - u³, ε=0.01.
+Demonstrates generality across PDE types.
+
+### Phase 1E — Hypothesis Testing
+
+**H1:** Basin entropy S_b correlates with failure rate across (optimizer, beta) pairs.
+- Spearman correlation of S_b vs failure_rate
+- Expected: positive (higher entropy = less predictable = higher failure)
+
+**H2:** Second-order methods produce lower S_b (smoother basins) than first-order.
+- Compare: {Adam} vs {L-BFGS, SSBFGS, PM-L-BFGS}
+- Mann-Whitney U test
+
+**H3:** PM-damping reduces S_b compared to standard L-BFGS.
+- Paired comparison: same runs, same inits, different optimizer
+- This is the key validation of Contribution 2
+
+---
+
+## Phase 2: PM-Damped L-BFGS Implementation (Method)
+
+### Phase 2A — Core Implementation
+
+**Variant 1 (zero overhead) — PRIMARY:**
+```
+d_k = L-BFGS_direction(θ_k)     # already computed
+g_k = ∇L(θ_k)                    # already computed
+β_k = ||g_k||² / (||g_k||² + ||g_k - d_k||²)
+θ_{k+1} = θ_k - β_k · d_k
 ```
 
 **Variant 2 (full PM two-step):**
 ```
-Predictor: y_k = θ_k − α · d_k
-Corrector: compute ∇L(y_k), apply formula (5) adapted for optimization
-θ_{k+1} = corrector result
+d_k = L-BFGS_direction(θ_k)
+y_k = θ_k - α · d_k                          # predictor
+g_y = ∇L(y_k)                                 # extra gradient
+d_y = L-BFGS_direction_at(y_k)                # extra L-BFGS step
+u_k = ||g_k||² / (b·||g_k||² + c·||g_y||²)   # corrector damping
+θ_{k+1} = y_k - u_k · d_y
 ```
 
-Note on formula (5) adaptation: in the original paper, the corrector involves divided differences [y,x;f] and the expression bI + cα²(I − [f'(x)]⁻¹[y,x;f])². For PINN training, we approximate:
-- f(x) → ∇L(θ)
-- [f'(x)]⁻¹f(x) → L-BFGS direction d_k
-- [y,x;f] → (∇L(y) − ∇L(x))/(y − x), approximated via finite differences or Hessian-vector product
+Where b, c are from the PM scheme formula (depend on α).
 
-**Practical simplification for Variant 2:** Use the scalar damping formula from the paper's eq. (4) adapted as:
-```
-u_k = ||g_k||² / (b·||g_k||² + c·||g(y_k)||²)
-θ_{k+1} = y_k − u_k · [f'(x_k)]⁻¹ · g(y_k)
-         ≈ y_k − u_k · d_k^corrector
-```
-where d_k^corrector is L-BFGS direction computed at y_k (extra L-BFGS step).
+**Implementation language:** PyTorch (matching existing convection_pinn.py infrastructure).
 
-**Deliverable:** JAX implementation, unit tests verifying β_k ∈ (0, 1] and convergence on toy problem.
+**Tests:**
+- β_k ∈ (0, 1] always
+- Convergence on toy quadratic: f(x) = x^T A x, A = diag(1, 100)
+- Convergence matches or exceeds standard L-BFGS on simple PINN (β=1)
 
-### Experiment 2.2 — PM-L-BFGS on Benchmark PDEs
+### Phase 2B — Benchmark Comparison
 
-Same PDEs as Phase 1 (convection β=30,50 and Allen-Cahn).
+**Setup:** Same PDEs as Phase 1 (convection β=30,50; Allen-Cahn).
 
-**Pipeline:**
-1. Adam phase: 10,000 steps, lr=1e-3
-2. Second phase: one of {L-BFGS, PM-L-BFGS(α), SSBFGS, NysNewton-CG}
+**Pipeline:** Adam 10,000 steps → second-order phase.
 
-**Metrics per run:**
-| Metric | Description |
+**Methods:**
+| Method | Description |
 |--------|-------------|
-| L2 relative error | Against analytical/reference solution |
-| Iteration count | Steps to reach L2 < 1e-4 (or timeout) |
-| Failure rate | Over 100 random seeds |
-| Wall-clock time | End-to-end training |
-| Final loss | Converged loss value |
+| L-BFGS | Standard, strong Wolfe line search |
+| PM-L-BFGS (α=-0.01) | Variant 1, small α |
+| PM-L-BFGS (α=0.1) | Variant 1, moderate α |
+| PM-L-BFGS-2step (α=-0.01) | Variant 2, full predictor-corrector |
+| SSBFGS | Urbán et al. 2024 |
+| NysNewton-CG | Rathore et al. 2024 (if feasible) |
 
-**α sweep:** −0.45, −0.1, −0.01, 0.01, 0.1, 0.45 (6 values, per paper's finding that small |α| is best).
+**Metrics:**
+- L2 relative error (final)
+- Steps to L2 < 1e-4 (or timeout at 50k total)
+- Failure rate over 100 seeds
+- Wall-clock time
+- Overhead vs standard L-BFGS (should be <5% for Variant 1)
 
-**Deliverable:** Comparison tables, convergence curves (loss vs iteration, L2 error vs iteration).
+### Phase 2C — Basin Smoothing Demonstration
 
-### Experiment 2.3 — Basin Maps with PM Damping
+The KEY figure of the paper: basin maps before and after PM damping.
 
-Build basin maps (same protocol as Phase 1) for:
-- Adam + L-BFGS (baseline, already computed in Phase 1)
-- Adam + PM-L-BFGS (α = −0.01)
-- Adam + PM-L-BFGS (α = 0.1)
-- Adam + PM-L-BFGS (α = 0.45)
+- Same initializations, same Phase 1C protocol
+- Side-by-side: Adam+L-BFGS vs Adam+PM-L-BFGS
+- Quantitative: ΔS_b, change in basin stability P(CORRECT)
+- Both in 2D maps AND dimension-independent k-NN entropy
 
-**Deliverable:** Side-by-side basin maps showing smoothing effect. Quantitative: ΔS_b and Δα_u before/after PM damping.
+### Phase 2D — Ablation
 
-### Experiment 2.4 — Ablation Study
+**α sweep:** -0.45, -0.1, -0.01, 0.01, 0.1, 0.45
+- Plot: failure rate vs α, S_b vs α, L2 error vs α
+- Expected: optimal near α≈0 (per Theorem 1 of 2015 paper)
 
-**A. α sensitivity:**
-- Fix PDE (convection β=30), architecture, Adam phase
-- Vary α over {−0.45, −0.3, −0.1, −0.01, 0.01, 0.1, 0.3, 0.45}
-- Plot: L2 error vs α, failure rate vs α, S_b vs α
-- Expected: U-shaped curve, minimum near α ≈ 0 (matching paper's Theorem 1: small |α| minimizes error coefficient)
-
-**B. Combination with existing fixes:**
+**Combinations:**
 - PM-L-BFGS alone
 - PM-L-BFGS + adaptive loss weighting (Wang et al. 2021)
-- PM-L-BFGS + curriculum training (Krishnapriyan et al. 2021)
-- PM-L-BFGS + both
-- Metrics: L2 error, failure rate over 100 seeds
+- PM-L-BFGS + curriculum training (Krishnapriyan 2021)
+- Shows orthogonality of our method
 
-**C. Approximation quality of d_k:**
-- Variant 1: L-BFGS direction (zero cost)
-- Variant 2: NysNewton-CG direction (extra Hessian-vector products)
-- Variant 3: Diagonal Hessian via Hutchinson estimator
-- Compare: β_k distribution, final L2 error, compute overhead
+### Phase 2E — 2D PDE (for JCP)
 
-**Deliverable:** Ablation plots and tables.
+**Required for JCP submission:** at least one 2D problem.
 
-### Experiment 2.5 — Scalability Test
+Options (pick one):
+- 2D Helmholtz equation (simpler, well-studied in PINN literature)
+- 2D lid-driven cavity (Navier-Stokes, impressive but expensive)
+- 2D Allen-Cahn (natural extension of 1D)
 
-**Optional (if time permits):** 2D Navier-Stokes lid-driven cavity.
-- Larger network (6×100), more parameters (~50k)
-- Show: PM-damping overhead is <5% of total training time
-- Compare failure rates: L-BFGS vs PM-L-BFGS over 50 random seeds
-
-**Deliverable:** Timing table, failure rate comparison.
+**Minimal demonstration:**
+- Show PM-L-BFGS works on 2D PDE
+- Basin stability comparison (1000 runs): L-BFGS vs PM-L-BFGS
+- Prove scalability (overhead still <5%)
 
 ---
 
-## Implementation Order & Dependencies
+## Phase 3: Paper Writing & Submission
+
+### Structure (for JCP)
+
+1. Introduction: PINN failure modes → basin analysis as diagnostic → PM-damping as fix
+2. Background: Basin stability (Menck 2013), basin entropy (Daza 2016), PM scheme (Budzko 2015)
+3. Methodology:
+   - 3.1 Monte Carlo basin stability for PINNs
+   - 3.2 k-NN basin entropy in parameter space
+   - 3.3 PM-damped L-BFGS
+4. Numerical Experiments:
+   - 4.1 Basin analysis results (convection, Allen-Cahn)
+   - 4.2 PM-L-BFGS comparison with baselines
+   - 4.3 Basin smoothing demonstration
+   - 4.4 2D PDE scalability
+   - 4.5 Ablation study
+5. Discussion: relationship to Ly & Gong 2025, FP64 findings, limitations
+6. Conclusion
+
+### Submission plan
+1. Post to arXiv (cs.LG + math.NA + cs.NA) for priority
+2. Submit to JCP
+3. If rejected → SISC (reframe for "methods and algorithms")
+4. If rejected → AMC (emphasize iterative methods theory)
+
+---
+
+## Implementation Priority & Dependencies
 
 ```
-Phase 0 ──────────────────────────────────────┐
-  0.1 Scalar basins (JAX infra)              │
-  0.2 System basins                           │
-  0.3 Convergence tables                      │
-                                               ▼
-Phase 1 ──────────────────────────────────────┐
-  1.1 Convection PINN basins  ◄── reuses basin plotting from 0.1
-  1.2 Allen-Cahn PINN basins  ◄── same infra
-  1.3 Basin entropy            ◄── post-processing on 1.1/1.2 maps
-  1.4 Hypothesis testing       ◄── uses 1.3 results
-                                               ▼
-Phase 2 ──────────────────────────────────────┐
-  2.1 PM-L-BFGS implementation
-  2.2 Benchmark comparison     ◄── needs 2.1 + Phase 1 baselines
-  2.3 Basin maps with PM       ◄── needs 2.1 + Phase 1 infra
-  2.4 Ablation study           ◄── needs 2.2 results
-  2.5 Scalability (optional)   ◄── needs 2.1
+Phase 0 [DONE] ─────────────────────────────────────────────┐
+                                                              │
+Phase 1A: Monte Carlo stability ◄── First, dimension-independent results
+    │                                 (needs only train function + FP64 fix)
+    │
+Phase 2A: PM-L-BFGS implementation ◄── Can start in parallel with 1A
+    │
+Phase 1B: k-NN entropy ◄── Post-processing on 1A results (no extra runs)
+    │
+Phase 1C: 2D basin maps ◄── Visualization, uses same infra
+    │
+Phase 2B: Benchmark comparison ◄── Needs 2A implementation
+    │
+Phase 1D: Allen-Cahn ◄── Second PDE, same protocol
+    │
+Phase 2C: Basin smoothing demo ◄── KEY FIGURE, needs 2A + 1C
+    │
+Phase 1E: Hypothesis testing ◄── Statistical analysis on all results
+    │
+Phase 2D: Ablation ◄── Needs 2B results
+    │
+Phase 2E: 2D PDE ◄── Last experimental piece
+    │
+Phase 3: Paper writing ◄── When all experiments done
 ```
 
-## File Structure
+## Compute Budget (Revised)
 
-```
-experiments/
-├── PLAN.md                          # This file
-├── phase0_reproduce/
-│   ├── iterative_methods.py         # Newton, E-K, Traub, Jarratt, PM implementations
-│   ├── basin_plotter.py             # Complex-plane basin visualization
-│   ├── scalar_basins.py             # Reproduce Figs 1-6
-│   ├── system_basins.py             # Reproduce Figs 7-8, four-body problem
-│   └── convergence_tables.py        # Reproduce Tables 1-2
-├── phase1_basin_analysis/
-│   ├── pinn_solver.py               # PINN training loop (JAX)
-│   ├── convection_pinn.py           # 1D convection equation PINN
-│   ├── allen_cahn_pinn.py           # Allen-Cahn equation PINN
-│   ├── basin_mapper.py              # Generate basin maps for PINN training
-│   ├── basin_entropy.py             # S_b and α_u computation (Daza et al. 2016)
-│   └── hypothesis_tests.py          # Statistical tests for H1-H3
-├── phase2_pm_damping/
-│   ├── pm_lbfgs.py                  # PM-damped L-BFGS optimizer
-│   ├── benchmark_comparison.py      # Compare PM-L-BFGS vs baselines
-│   ├── basin_smoothing.py           # Basin maps before/after PM damping
-│   ├── ablation_alpha.py            # α sensitivity study
-│   ├── ablation_combinations.py     # PM + existing fixes
-│   └── ablation_approximation.py    # d_k approximation quality
-├── shared/
-│   ├── pde_definitions.py           # PDE residuals, exact solutions, BCs
-│   ├── network.py                   # MLP architecture (JAX/Flax)
-│   ├── metrics.py                   # L2 error, failure classification
-│   └── visualization.py            # Plotting utilities
-└── notebooks/
-    ├── phase0_results.ipynb
-    ├── phase1_results.ipynb
-    └── phase2_results.ipynb
-```
+| Phase | GPU-hours (A100) | Notes |
+|-------|-----------------|-------|
+| 1A: MC stability (convection, 5 betas, 4 opts) | ~39h | 20k runs × 7s |
+| 1A: MC stability (Allen-Cahn) | ~39h | Same scale |
+| 1B: k-NN entropy | 0 | Post-processing only |
+| 1C: 2D maps (30×30, 3 betas, 4 opts, 3 types) | ~20h | ~10k runs |
+| 2B: Benchmarks (100 seeds × 6 methods × 2 PDEs) | ~10h | Longer runs but fewer |
+| 2C: Basin smoothing | ~10h | Subset of 1C with PM |
+| 2D: Ablation | ~15h | 6 alphas × 100 seeds × 2 PDEs |
+| 2E: 2D PDE | ~20h | Larger network, fewer runs |
+| **Total** | **~150h** | ~6 days continuous on A100 |
 
-## Compute Budget Estimate
+At Colab Pro ($10/month): ~2-3 months with A100 allocation.
 
-| Phase | GPU-hours | Colab Pro months | Cost |
-|-------|-----------|------------------|------|
-| Phase 0 | <1 | 0 (free tier) | $0 |
-| Phase 1 | 100-400 | 1-2 | $10-20 |
-| Phase 2 | 50-200 | 1 | $10 |
-| **Total** | **~150-600** | **2-3** | **$20-30** |
+## Key Technical Decisions
 
-Key optimization: jax.vmap to run hundreds of PINNs in parallel on single GPU. Each individual PINN is tiny (4×50 MLP), so GPU memory allows batching 100-400 simultaneously.
+1. **FP64 everywhere** — per FP64 paper (NeurIPS 2025), many "failure modes" are FP32 artifacts
+2. **PyTorch** — matching existing codebase (convection_pinn.py uses PyTorch, not JAX)
+3. **Checkpointing per run** — Colab disconnects are inevitable; save each run individually
+4. **SSBFGS baseline** — must implement or port from Urbán et al. code (check if public)
+5. **Seed × LR grid** — keep as one visualization type, but NOT the primary result
 
-## Success Criteria
+## Success Criteria (for JCP acceptance)
 
 | Criterion | Minimum | Target |
 |-----------|---------|--------|
-| Phase 0 reproduces paper | Visual match of basins | + matching ACOC values |
-| Basin entropy distinguishes optimizers | S_b differs by >0.1 between Adam and L-BFGS | + α_u correlation with failure rate (r > 0.5) |
-| PM-L-BFGS reduces failure rate | >10% relative reduction vs L-BFGS | >30% reduction |
-| PM-L-BFGS smooths basins | Visible smoothing in maps | + S_b reduction >0.2, α_u increase >0.1 |
-| Overhead of PM damping | <20% wall-clock increase | <5% |
+| Basin stability clearly differentiates optimizers | P(CORRECT) differs by >15% | >30% difference |
+| S_b correlates with failure rate | Spearman r > 0.4 | r > 0.7 |
+| PM-L-BFGS reduces failure rate vs L-BFGS | >10% relative | >30% relative |
+| PM-L-BFGS competitive with SSBFGS | Within 2× L2 error | Matches or beats |
+| PM overhead | <20% wall-clock | <5% (Variant 1) |
+| 2D PDE demonstration works | PM converges | PM beats L-BFGS |
+| Cross-section consistency | std(S_b) < 0.2 across planes | std < 0.1 |

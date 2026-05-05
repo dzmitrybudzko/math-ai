@@ -19,18 +19,27 @@ This module provides:
 import torch
 import torch.nn as nn
 import numpy as np
+import json
 import time
+from pathlib import Path
 
 
 # =================================================================
 # PINN Model
 # =================================================================
 
+def set_precision(use_fp64=True):
+    """Set default dtype. FP64 recommended per FP64 paper (NeurIPS 2025)."""
+    dtype = torch.float64 if use_fp64 else torch.float32
+    torch.set_default_dtype(dtype)
+    return dtype
+
+
 class PINN(nn.Module):
     def __init__(self, layers=None):
         super().__init__()
         if layers is None:
-            layers = [2, 30, 30, 30, 1]
+            layers = [2, 50, 50, 50, 50, 1]
         modules = []
         for i in range(len(layers) - 2):
             modules.append(nn.Linear(layers[i], layers[i + 1]))
@@ -153,7 +162,7 @@ DIVERGED = 2
 
 
 def train_single(seed, beta, method="adam", n_adam=5000, n_lbfgs=100,
-                 lr_adam=1e-3, device="cpu"):
+                 lr_adam=1e-3, device="cpu", layers=None):
     """
     Train a single PINN from a given seed.
 
@@ -164,7 +173,7 @@ def train_single(seed, beta, method="adam", n_adam=5000, n_lbfgs=100,
     final_loss : float
     """
     torch.manual_seed(seed)
-    model = PINN().to(device)
+    model = PINN(layers=layers).to(device)
 
     x_pde, t_pde, x_ic, u_ic = generate_training_data(device=device)
 
